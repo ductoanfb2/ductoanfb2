@@ -1,88 +1,80 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { writeFile, unlink, mkdir } from 'fs/promises'
+import { readFile, rm, stat } from 'fs/promises'
 import { join } from 'path'
 import { existsSync } from 'fs'
-import FormData from 'form-data'
-import fetch from 'node-fetch'
 
 const execAsync = promisify(exec)
+export const runtime = 'nodejs'
+export const maxDuration = 300 
+
+async function waitFile(path: string) {
+  for (let i = 0; i < 10; i++) {
+    if (existsSync(path) && (await stat(path)).size > 0) return true
+    await new Promise(r => setTimeout(r, 500))
+  }
+  return false
+}
 
 export async function POST(request: NextRequest) {
   try {
-    const formData = await request.formData()
-    const videoFile = formData.get('video') as File
-    const outroVideoFile = formData.get('outroVideo') as File
-    const resolution = formData.get('resolution') as string
-    const mirrored = formData.get('mirrored') === 'true'
-
-    if (!videoFile) {
-      return NextResponse.json({ error: 'No video file provided' }, { status: 400 })
-    }
-
-    // Tạo thư mục temp nếu chưa có
-    const tempDir = join(process.cwd(), 'temp')
-    if (!existsSync(tempDir)) {
-      await mkdir(tempDir, { recursive: true })
-    }
-
-    const timestamp = Date.now()
-    const inputFileName = `input_${timestamp}.${videoFile.name.split('.').pop()}`
-    const outputFileName = `output_${timestamp}.mp4`
+    const body = await request.json();
+    const { uploadId, fileName, resolution, mirrored, hasOutro } = body;
     
-    const inputPath = join(tempDir, inputFileName)
-    const outputPath = join(tempDir, outputFileName)
+    const tempDir = join(process.cwd(), 'temp', uploadId)
+    const inputPath = join(tempDir, 'full_video.tmp')
+    const outputPath = join(tempDir, `out_${Date.now()}.mp4`)
+    const outroPath = join(tempDir, 'outro_video.tmp')
 
-    const arrayBuffer = await videoFile.arrayBuffer()
-    await writeFile(inputPath, Buffer.from(arrayBuffer))
-
-    // Lệnh FFmpeg
-    const resolutions = { '720p': '720x1280', '1080p': '1080x1920', '4K': '2160x3840' }
-    const targetResolution = resolutions[resolution as keyof typeof resolutions] || resolutions['1080p']
-
-    let ffmpegCommand = `ffmpeg -i "${inputPath}" -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 128k -s ${targetResolution}`
-
-    if (mirrored) ffmpegCommand += ' -vf "hflip"'
-
-    if (outroVideoFile) {
-      const outroFileName = `outro_${timestamp}.${outroVideoFile.name.split('.').pop()}`
-      const outroPath = join(tempDir, outroFileName)
-      await writeFile(outroPath, Buffer.from(await outroVideoFile.arrayBuffer()))
-
-      ffmpegCommand = mirrored
-        ? `ffmpeg -i "${inputPath}" -i "${outroPath}" -filter_complex "[0:v]hflip,scale=${targetResolution},setsar=1,setdar=9/16[v0];[1:v]scale=${targetResolution},setsar=1,setdar=9/16[v1];[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[outv][outa]" -map "[outv]" -map "[outa]" -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 128k`
-        : `ffmpeg -i "${inputPath}" -i "${outroPath}" -filter_complex "[0:v]scale=${targetResolution},setsar=1,setdar=9/16[v0];[1:v]scale=${targetResolution},setsar=1,setdar=9/16[v1];[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[outv][outa]" -map "[outv]" -map "[outa]" -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 128k`
+    // 1. Kiểm tra file gốc đã upload xong chưa
+    if (!(await waitFile(inputPath))) {
+      return NextResponse.json({ error: 'Không tìm thấy file video đã upload' }, { status: 404 })
     }
 
-    ffmpegCommand += ` "${outputPath}"`
+    // 2. Cấu hình độ phân giải
+    const resolutions = { '720p': '720:1280', '1080p': '1080:1920', '4K': '2160:3840' }
+    const targetRes = resolutions[resolution as keyof typeof resolutions] || resolutions['1080p']
+
+    let ffmpegCommand = ""
+
+    // 3. Xây dựng lệnh FFmpeg dựa trên việc có Outro hay không
+    if (hasOutro && existsSync(outroPath)) {
+      // TRƯỜNG HỢP CÓ OUTRO: Ghép video
+      const flipFilter = mirrored ? 'hflip,' : ''
+      ffmpegCommand = `ffmpeg -y -i "${inputPath}" -i "${outroPath}" -filter_complex "[0:v]${flipFilter}scale=${targetRes},setsar=1,setdar=9/16[v0];[1:v]scale=${targetRes},setsar=1,setdar=9/16[v1];[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[outv][outa]" -map "[outv]" -map "[outa]" -c:v libx264 -preset ultrafast -crf 20 -c:a aac -b:a 128k "${outputPath}"`
+    } else {
+      // TRƯỜNG HỢP KHÔNG OUTRO: Chỉ scale/flip
+      const vf = mirrored 
+        ? `hflip,scale=${targetRes},setsar=1,setdar=9/16` 
+        : `scale=${targetRes},setsar=1,setdar=9/16`
+      ffmpegCommand = `ffmpeg -y -i "${inputPath}" -vf "${vf}" -c:v libx264 -preset ultrafast -crf 20 -c:a aac -b:a 128k "${outputPath}"`
+    }
+
     console.log('Executing FFmpeg command:', ffmpegCommand)
     await execAsync(ffmpegCommand)
-
-    // Đọc file output
-    const outputBuffer = await import('fs').then(fs => fs.promises.readFile(outputPath))
-
-    // Cleanup temp files
-    await unlink(inputPath).catch(() => {})
-    await unlink(outputPath).catch(() => {})
-    if (outroVideoFile) {
-      const outroPath = join(tempDir, `outro_${timestamp}.${outroVideoFile.name.split('.').pop()}`)
-      await unlink(outroPath).catch(() => {})
+    
+    if (!existsSync(outputPath)) {
+        throw new Error("FFmpeg không tạo được file output.")
     }
 
-    // Trả về video đã xử lý như trước
-    return new Response(new Uint8Array(outputBuffer), {
+    const buffer = await readFile(outputPath)
+    
+    // 4. Dọn dẹp thư mục tạm
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {})
+
+    return new Response(buffer, {
       headers: {
         'Content-Type': 'video/mp4',
-        'Content-Disposition': `attachment; filename="processed_${videoFile.name}"`,
+        'Content-Disposition': `attachment; filename="edited_${fileName}"`,
       },
     })
 
   } catch (error) {
-    console.error('Error processing video:', error)
-    return NextResponse.json(
-      { error: 'Failed to process video', details: error instanceof Error ? error.message : 'Unknown error' },
-      { status: 500 }
-    )
+    console.error("Render Error:", error)
+    return NextResponse.json({ 
+        error: 'Render lỗi', 
+        details: error instanceof Error ? error.message : String(error) 
+    }, { status: 500 })
   }
 }
