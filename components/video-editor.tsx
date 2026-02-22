@@ -102,76 +102,72 @@ export default function VideoEditor() {
       if (!videoFiles[videoIndex]) return
 
       setVideoFiles((prev) =>
-        prev.map((video, i) => (i === videoIndex ? { ...video, isProcessing: true, progress: 0 } : video)),
+        prev.map((v, i) => (i === videoIndex ? { ...v, isProcessing: true, progress: 0 } : v))
       )
 
       try {
-        const formData = new FormData()
-        formData.append('video', videoFiles[videoIndex].file)
-        formData.append('resolution', settings.resolution)
-        formData.append('mirrored', settings.mirrored.toString())
-        
-        // Thêm outro video nếu có
-        if (settings.outroVideo) {
-          formData.append('outroVideo', settings.outroVideo)
+        const file = videoFiles[videoIndex].file
+        const uploadId = Date.now().toString()
+        const CHUNK_SIZE = 2 * 1024 * 1024 // 2MB
+
+        // --- BƯỚC 1: UPLOAD VIDEO GỐC (CHUNK) ---
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE
+          const end = Math.min(file.size, start + CHUNK_SIZE)
+          const chunk = file.slice(start, end)
+
+          const formData = new FormData()
+          formData.append('chunk', chunk)
+          formData.append('uploadId', uploadId)
+          formData.append('isOutro', 'false')
+
+          const res = await fetch('/api/upload-chunk', { method: 'POST', body: formData })
+          if (!res.ok) throw new Error(`Lỗi upload phần ${i + 1}`)
+
+          // Cập nhật progress (40% đầu cho upload)
+          const progress = Math.round(((i + 1) / totalChunks) * 40)
+          setVideoFiles(p => p.map((v, idx) => idx === videoIndex ? { ...v, progress } : v))
         }
 
-        const response = await fetch('/api/process-video', {
+        // --- BƯỚC 2: UPLOAD OUTRO (GỬI NGUYÊN FILE) ---
+        if (settings.outroVideo) {
+          const formData = new FormData()
+          formData.append('chunk', settings.outroVideo)
+          formData.append('uploadId', uploadId)
+          formData.append('isOutro', 'true')
+          const res = await fetch('/api/upload-chunk', { method: 'POST', body: formData })
+          if (!res.ok) throw new Error('Lỗi upload video Outro')
+        }
+
+        // --- BƯỚC 3: GỌI RENDER ---
+        const processRes = await fetch('/api/process-video', {
           method: 'POST',
-          body: formData,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uploadId,
+            fileName: file.name,
+            resolution: settings.resolution,
+            mirrored: settings.mirrored,
+            hasOutro: !!settings.outroVideo,
+          }),
         })
 
-        if (!response.ok) {
-          throw new Error('Failed to process video')
-        }
+        if (!processRes.ok) throw new Error('Server không thể xử lý video')
 
-        // Tạo progress tracking
-        const progressInterval = setInterval(() => {
-          setVideoFiles((prev) =>
-            prev.map((video, i) =>
-              i === videoIndex
-                ? {
-                    ...video,
-                    progress: Math.min((video.progress || 0) + 5, 95),
-                  }
-                : video,
-            ),
-          )
-        }, 500)
-
-        const blob = await response.blob()
-        clearInterval(progressInterval)
-
+        const blob = await processRes.blob()
         const processedUrl = URL.createObjectURL(blob)
-        setVideoFiles((prev) =>
-          prev.map((video, i) =>
-            i === videoIndex
-              ? {
-                  ...video,
-                  processedUrl,
-                  isProcessing: false,
-                  progress: 100,
-                }
-              : video,
-          ),
-        )
+
+        setVideoFiles(p => p.map((v, idx) => idx === videoIndex ? {
+          ...v, processedUrl, isProcessing: false, progress: 100
+        } : v))
+
       } catch (error) {
-        console.error('Error processing video:', error)
-        setVideoFiles((prev) =>
-          prev.map((video, i) =>
-            i === videoIndex
-              ? {
-                  ...video,
-                  isProcessing: false,
-                  progress: 0,
-                }
-              : video,
-          ),
-        )
-        alert('Có lỗi xảy ra khi xử lý video. Vui lòng thử lại.')
+        alert(error instanceof Error ? error.message : "Lỗi không xác định")
+        setVideoFiles(p => p.map((v, idx) => idx === videoIndex ? { ...v, isProcessing: false } : v))
       }
     },
-    [settings, videoFiles],
+    [videoFiles, settings]
   )
 
   const processAllVideos = useCallback(async () => {
