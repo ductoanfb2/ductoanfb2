@@ -42,13 +42,13 @@ export async function POST(request: NextRequest) {
     if (hasOutro && existsSync(outroPath)) {
       // TRƯỜNG HỢP CÓ OUTRO: Ghép video
       const flipFilter = mirrored ? 'hflip,' : ''
-      ffmpegCommand = `ffmpeg -y -i "${inputPath}" -i "${outroPath}" -filter_complex "[0:v]${flipFilter}scale=${targetRes},setsar=1,setdar=9/16[v0];[1:v]scale=${targetRes},setsar=1,setdar=9/16[v1];[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[outv][outa]" -map "[outv]" -map "[outa]" -c:v libx264 -preset ultrafast -crf 20 -c:a aac -b:a 128k "${outputPath}"`
+      ffmpegCommand = `ffmpeg -y -i "${inputPath}" -i "${outroPath}" -filter_complex "[0:v]${flipFilter}scale=${targetRes},setsar=1,setdar=9/16[v0];[1:v]scale=${targetRes},setsar=1,setdar=9/16[v1];[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[outv][outa]" -map "[outv]" -map "[outa]" -c:v libx264 -preset medium -crf 20 -c:a aac -b:a 128k "${outputPath}"`
     } else {
       // TRƯỜNG HỢP KHÔNG OUTRO: Chỉ scale/flip
       const vf = mirrored 
         ? `hflip,scale=${targetRes},setsar=1,setdar=9/16` 
         : `scale=${targetRes},setsar=1,setdar=9/16`
-      ffmpegCommand = `ffmpeg -y -i "${inputPath}" -vf "${vf}" -c:v libx264 -preset ultrafast -crf 20 -c:a aac -b:a 128k "${outputPath}"`
+      ffmpegCommand = `ffmpeg -y -i "${inputPath}" -vf "${vf}" -c:v libx264 -preset medium -crf 20 -c:a aac -b:a 128k "${outputPath}"`
     }
 
     console.log('Executing FFmpeg command:', ffmpegCommand)
